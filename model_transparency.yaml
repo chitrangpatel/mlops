@@ -1,0 +1,181 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  name: parallel-pipeline
+  annotations:
+    tekton.dev/output_artifacts: '{"build-model": [{"key": "artifacts/$PIPELINERUN/build-model/digest.tgz",
+      "name": "build-model-digest", "path": "/tmp/outputs/digest/data"}], "build-model-2":
+      [{"key": "artifacts/$PIPELINERUN/build-model-2/model_ARTIFACT_DIGEST.tgz", "name":
+      "build-model-2-model_ARTIFACT_DIGEST", "path": "/tmp/outputs/model_ARTIFACT_DIGEST/data"},
+      {"key": "artifacts/$PIPELINERUN/build-model-2/model_ARTIFACT_URI.tgz", "name":
+      "build-model-2-model_ARTIFACT_URI", "path": "/tmp/outputs/model_ARTIFACT_URI/data"}],
+      "git-clone": [{"key": "artifacts/$PIPELINERUN/git-clone/CHAINS-GIT_COMMIT.tgz",
+      "name": "git-clone-CHAINS-GIT_COMMIT", "path": "/tmp/outputs/CHAINS-GIT_COMMIT/data"},
+      {"key": "artifacts/$PIPELINERUN/git-clone/CHAINS-GIT_URL.tgz", "name": "git-clone-CHAINS-GIT_URL",
+      "path": "/tmp/outputs/CHAINS-GIT_URL/data"}]}'
+    tekton.dev/input_artifacts: '{}'
+    tekton.dev/artifact_bucket: mlpipeline
+    tekton.dev/artifact_endpoint: minio-service.kubeflow:9000
+    tekton.dev/artifact_endpoint_scheme: http://
+    tekton.dev/artifact_items: '{"build-model": [["digest", "$(results.digest.path)"]],
+      "build-model-2": [["model_ARTIFACT_DIGEST", "$(results.model-ARTIFACT-DIGEST.path)"],
+      ["model_ARTIFACT_URI", "$(results.model-ARTIFACT-URI.path)"]], "git-clone":
+      [["CHAINS-GIT_COMMIT", "$(results.CHAINS-GIT-COMMIT.path)"], ["CHAINS-GIT_URL",
+      "$(results.CHAINS-GIT-URL.path)"]]}'
+    sidecar.istio.io/inject: "false"
+    tekton.dev/template: ''
+    pipelines.kubeflow.org/big_data_passing_format: $(workspaces.$TASK_NAME.path)/artifacts/$ORIG_PR_NAME/$TASKRUN_NAME/$TASK_PARAM_NAME
+    pipelines.kubeflow.org/pipeline_spec: '{"description": "Download two messages
+      in parallel and prints the concatenated result.", "inputs": [{"default": "https://github.com/google/model-transparency",
+      "name": "url", "optional": true, "type": "String"}, {"default": "pipeline",
+      "name": "target", "optional": true, "type": "String"}, {"default": "pytorch_model.pth",
+      "name": "model", "optional": true, "type": "String"}], "name": "parallel-pipeline"}'
+  labels:
+    pipelines.kubeflow.org/pipelinename: ''
+    pipelines.kubeflow.org/generation: ''
+spec:
+  params:
+  - name: model
+    value: pytorch_model.pth
+  - name: target
+    value: pipeline
+  - name: url
+    value: https://github.com/google/model-transparency
+  pipelineSpec:
+    params:
+    - name: model
+      default: pytorch_model.pth
+    - name: target
+      default: pipeline
+    - name: url
+      default: https://github.com/google/model-transparency
+    tasks:
+    - name: git-clone
+      params:
+      - name: url
+        value: $(params.url)
+      taskSpec:
+        steps:
+        - name: main
+          args:
+          - -u
+          - $(inputs.params.url)
+          - -c
+          - $(results.CHAINS-GIT-COMMIT.path)
+          - -p
+          - $(results.CHAINS-GIT-URL.path)
+          - -t
+          - $(workspaces.shared-ws.path)/pipeline
+          command:
+          - ./clone.sh
+          image: chitrangpatel/git-clone
+        params:
+        - name: url
+        results:
+        - name: CHAINS-GIT-COMMIT
+          type: string
+          description: /tmp/outputs/CHAINS-GIT_COMMIT/data
+        - name: CHAINS-GIT-URL
+          type: string
+          description: /tmp/outputs/CHAINS-GIT_URL/data
+        workspaces:
+        - name: shared-ws
+        metadata:
+          labels:
+            pipelines.kubeflow.org/cache_enabled: "true"
+      workspaces:
+      - name: shared-ws
+        workspace: shared-ws
+    - name: build-model
+      params:
+      - name: model
+        value: $(params.model)
+      taskSpec:
+        steps:
+        - name: main
+          args:
+          - -r
+          - slsa_for_models/install/requirements_Linux.txt
+          - -w
+          - $(workspaces.shared-ws.path)/pipeline
+          - -s
+          - slsa_for_models/main.py
+          - -m
+          - $(inputs.params.model)
+          - -d
+          - $(results.digest.path)
+          command:
+          - ./build.sh
+          image: chitrangpatel/build-model
+        params:
+        - name: model
+        results:
+        - name: digest
+          type: string
+          description: /tmp/outputs/digest/data
+        workspaces:
+        - name: shared-ws
+        metadata:
+          labels:
+            pipelines.kubeflow.org/cache_enabled: "true"
+      workspaces:
+      - name: shared-ws
+        workspace: shared-ws
+      runAfter:
+      - git-clone
+    - name: build-model-2
+      params:
+      - name: model
+        value: $(params.model)
+      taskSpec:
+        steps:
+        - name: main
+          args:
+          - -r
+          - $(results.model-ARTIFACT-URI.path)
+          - -w
+          - $(workspaces.shared-ws.path)/pipeline
+          - -c
+          - $(results.model-ARTIFACT-DIGEST.path)
+          - -s
+          - $(inputs.params.model)
+          - -l
+          - gs://chitrang-ml-models/pytorch_model.pth
+          command:
+          - ./upload.sh
+          image: chitrangpatel/upload-model
+        params:
+        - name: model
+        results:
+        - name: model-ARTIFACT-DIGEST
+          type: string
+          description: /tmp/outputs/model_ARTIFACT_DIGEST/data
+        - name: model-ARTIFACT-URI
+          type: string
+          description: /tmp/outputs/model_ARTIFACT_URI/data
+        workspaces:
+        - name: shared-ws
+        metadata:
+          labels:
+            pipelines.kubeflow.org/cache_enabled: "true"
+      workspaces:
+      - name: shared-ws
+        workspace: shared-ws
+      runAfter:
+      - build-model
+    workspaces:
+    - name: shared-ws
+  taskRunTemplate:
+    podTemplate:
+      securityContext:
+        runAsUser: 0
+      automountServiceAccountToken: true
+  workspaces:
+  - name: shared-ws
+    volumeClaimTemplate:
+      spec:
+        accessModes:
+        - ReadWriteOnce
+        resources:
+          requests:
+            storage: 5Gi
